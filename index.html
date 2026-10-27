@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>곤충 잡기 동작 인식 게임 (쉬운 버전)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js & PoseNet -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.7.4/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8.6/dist/teachablemachine-pose.min.js"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Jua&display=swap');
+        body {
+            font-family: 'Jua', sans-serif;
+            touch-action: manipulation;
+            user-select: none;
+        }
+        .canvas-container {
+            position: relative;
+            width: 100%;
+            max-width: 680px;
+            aspect-ratio: 4/3;
+        }
+        #webcam-canvas, #game-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border-radius: 1.25rem;
+        }
+        #webcam-canvas {
+            transform: scaleX(-1);
+        }
+        @keyframes pulse-zone-easy {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.7; }
+            50% { transform: translate(-50%, -50%) scale(1.12); opacity: 0.95; }
+        }
+        .target-zone-pulse {
+            animation: pulse-zone-easy 1.2s infinite ease-in-out;
+        }
+        .action-flash-clap {
+            box-shadow: 0 0 50px rgba(250, 204, 21, 0.8) inset;
+        }
+        .action-flash-fist {
+            box-shadow: 0 0 50px rgba(248, 113, 113, 0.8) inset;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-white min-h-screen flex flex-col items-center justify-between p-3 md:p-5">
+
+    <!-- Header Section -->
+    <header class="text-center my-1">
+        <h1 class="text-3xl md:text-5xl font-extrabold text-amber-400 drop-shadow-lg tracking-wide">
+            🪰 곤충 퇴치 작전 (Easy Mode) 🪳
+        </h1>
+        <p class="text-slate-300 text-xs md:text-sm mt-1">
+            타겟 존 안에서! <span class="text-yellow-300 font-bold">파리 ➔ 박수 👏 [A/1/←]</span> | <span class="text-red-400 font-bold">바퀴 ➔ 주먹 ✊ [S/2/→]</span>
+        </p>
+    </header>
+
+    <!-- Score Board & Stats Bar -->
+    <div class="w-full max-w-2xl bg-slate-900/90 backdrop-blur rounded-2xl p-3 md:p-4 my-2 border border-slate-700/80 shadow-2xl flex justify-around items-center text-center">
+        <div class="flex flex-col">
+            <span class="text-slate-400 text-xs">현재 점수</span>
+            <span id="score-display" class="text-2xl md:text-4xl font-black text-amber-400">0</span>
+        </div>
+        <div class="h-8 w-[1px] bg-slate-700"></div>
+        <div class="flex flex-col">
+            <span class="text-slate-400 text-xs">연속 콤보</span>
+            <span id="combo-display" class="text-2xl md:text-4xl font-black text-emerald-400">0🔥</span>
+        </div>
+        <div class="h-8 w-[1px] bg-slate-700"></div>
+        <div class="flex flex-col">
+            <span class="text-slate-400 text-xs">인식 포즈 / 키</span>
+            <span id="pose-display" class="text-lg md:text-2xl font-bold text-cyan-300">대기 중</span>
+        </div>
+        <div class="h-8 w-[1px] bg-slate-700"></div>
+        <div class="flex flex-col">
+            <span class="text-slate-400 text-xs">남은 시간</span>
+            <span id="timer-display" class="text-2xl md:text-4xl font-black text-rose-500">60s</span>
+        </div>
+    </div>
+
+    <!-- Main Game Canvas Area -->
+    <main id="main-canvas-wrapper" class="canvas-container shadow-2xl rounded-2xl overflow-hidden border-4 border-slate-700 bg-black transition-all duration-150">
+        <!-- 웹캠 비디오 인풋 처리 캔버스 -->
+        <canvas id="webcam-canvas"></canvas>
+        <!-- 벌레 & 이펙트 레이어 캔버스 -->
+        <canvas id="game-canvas"></canvas>
+
+        <!-- 넓어진 타겟 존 (Hit Window: 140px 반지름) -->
+        <div id="target-zone-ui" class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 md:w-72 md:h-72 border-4 border-dashed border-amber-400/80 rounded-full pointer-events-none target-zone-pulse flex items-center justify-center transition-all duration-200">
+            <span class="text-xs md:text-sm text-amber-300 font-bold bg-slate-950/70 px-3 py-1 rounded-full border border-amber-500/40">
+                🎯 넓은 판정 존
+            </span>
+        </div>
+
+        <!-- 실시간 강한 액션 피드백 배너 -->
+        <div id="action-banner" class="absolute top-4 left-1/2 -translate-x-1/2 px-6 py-2 rounded-full font-black text-lg md:text-xl shadow-lg opacity-0 transition-all duration-150 transform -translate-y-2 pointer-events-none z-20">
+            -
+        </div>
+
+        <!-- 모바일 / 키보드 원터치 버튼 보조 바 -->
+        <div class="absolute bottom-3 left-0 right-0 flex justify-center space-x-3 px-4 z-20">
+            <button onclick="triggerManualAction('clap')" class="flex-1 max-w-[160px] py-2.5 bg-yellow-500/90 hover:bg-yellow-400 text-slate-950 font-black rounded-xl shadow-lg border-2 border-yellow-300 active:scale-95 transition text-sm md:text-base">
+                👏 박수 (A / ←)
+            </button>
+            <button onclick="triggerManualAction('fist')" class="flex-1 max-w-[160px] py-2.5 bg-rose-600/90 hover:bg-rose-500 text-white font-black rounded-xl shadow-lg border-2 border-rose-400 active:scale-95 transition text-sm md:text-base">
+                ✊ 주먹 (S / →)
+            </button>
+        </div>
+
+        <!-- Start / Game Over Modal -->
+        <div id="modal-overlay" class="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-30">
+            <div id="modal-start-content" class="max-w-md">
+                <div class="text-5xl mb-3 animate-bounce">🪰 👏 ✊ 🪳</div>
+                <h2 class="text-3xl font-extrabold mb-2 text-amber-400">곤충 잡기 (판정 완화 버전)</h2>
+                <p class="text-slate-300 text-xs md:text-sm mb-4">
+                    동작 인식이 훨씬 쉬워졌습니다! 키보드/버튼 조작도 함께 지원됩니다.
+                </p>
+                <div class="text-left text-slate-300 mb-6 text-xs md:text-sm space-y-2 bg-slate-900 p-4 rounded-xl border border-slate-800">
+                    <p class="font-bold text-amber-300 mb-1">🎮 조작 가이드:</p>
+                    <li class="list-none">👏 <b>파리</b> ➔ 손 모으기 / <b>[키보드 A, 1, ←]</b></li>
+                    <li class="list-none">✊ <b>바퀴벌레</b> ➔ 손 올리기·주먹 / <b>[키보드 S, 2, →]</b></li>
+                    <li class="list-none">🎯 넓어진 노란 원 영역 안에서 언제든지 치면 바로 잡힙니다!</li>
+                </div>
+                <button id="start-btn" onclick="startGame()" class="w-full py-3 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xl rounded-xl shadow-xl transition transform hover:scale-105 active:scale-95">
+                    게임 시작하기
+                </button>
+            </div>
+
+            <div id="modal-gameover-content" class="hidden max-w-md">
+                <div class="text-6xl mb-2">🏆</div>
+                <h2 class="text-3xl font-bold mb-1 text-rose-500">게임 종료!</h2>
+                <p class="text-slate-400 text-sm mb-4">엄청난 순발력입니다!</p>
+                <div class="bg-slate-900 p-5 rounded-2xl border border-slate-800 mb-6 grid grid-cols-2 gap-4">
+                    <div>
+                        <span class="text-slate-400 text-xs block">최종 점수</span>
+                        <span id="final-score" class="text-3xl font-black text-amber-400">0</span>
+                    </div>
+                    <div>
+                        <span class="text-slate-400 text-xs block">최대 콤보</span>
+                        <span id="final-combo" class="text-3xl font-black text-emerald-400">0</span>
+                    </div>
+                </div>
+                <button onclick="resetGame()" class="w-full py-3 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-slate-950 font-black text-xl rounded-xl shadow-xl transition transform hover:scale-105 active:scale-95">
+                    다시 도전하기
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast Notice -->
+    <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-full bg-slate-800/90 border border-slate-700 shadow-2xl text-center font-bold text-xs md:text-sm transition-all duration-300 opacity-0 translate-y-4 pointer-events-none z-50">
+        안내 메시지
+    </div>
+
+    <!-- Footer -->
+    <footer class="text-slate-500 text-xs text-center mt-2">
+        💡 팁: 카메라 동작이 어려우면 키보드 <b>A/S키</b> 또는 <b>방향키</b>를 눌러도 똑같이 플레이할 수 있습니다!
+    </footer>
+
+    <script>
+        // --- EASY MODE CONFIGURATION ---
+        const GAME_DURATION = 60; // 60초
+        const BUG_SPAWN_INTERVAL = 1400; // 1.4초마다 생성
+        const EASY_TARGET_RADIUS = 130; // 타겟존 반지름 (기존 60 -> 130으로 약 2배 이상 대폭 확대)
+
+        // --- GAME STATE ---
+        let score = 0;
+        let combo = 0;
+        let maxCombo = 0;
+        let timeLeft = GAME_DURATION;
+        let isGameRunning = false;
+        let webcam, ctx, gameCtx;
+        let bugs = [];
+        let hitEffects = [];
+        let gameTimer = null;
+        let spawnTimer = null;
+        let currentPose = "대기";
+        let lastActionTime = 0;
+
+        // Elements
+        const webcamCanvas = document.getElementById('webcam-canvas');
+        const gameCanvas = document.getElementById('game-canvas');
+        const scoreDisplay = document.getElementById('score-display');
+        const comboDisplay = document.getElementById('combo-display');
+        const poseDisplay = document.getElementById('pose-display');
+        const timerDisplay = document.getElementById('timer-display');
+        const modalOverlay = document.getElementById('modal-overlay');
+        const modalStartContent = document.getElementById('modal-start-content');
+        const modalGameOverContent = document.getElementById('modal-gameover-content');
+        const finalScore = document.getElementById('final-score');
+        const finalCombo = document.getElementById('final-combo');
+        const actionBanner = document.getElementById('action-banner');
+        const mainWrapper = document.getElementById('main-canvas-wrapper');
+        const targetZoneUI = document.getElementById('target-zone-ui');
+
+        // Sound Synthesis (Tone-like Web Audio API for feedback)
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        let audioCtx = null;
+
+        function playSound(type) {
+            try {
+                if (!audioCtx) audioCtx = new AudioCtx();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                const now = audioCtx.currentTime;
+                if (type === 'hit') {
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(300, now);
+                    osc.frequency.exponentialRampToValueAtTime(800, now + 0.15);
+                    gain.gain.setValueAtTime(0.3, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+                    osc.start(now);
+                    osc.stop(now + 0.15);
+                } else if (type === 'miss') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(180, now);
+                    osc.frequency.linearRampToValueAtTime(100, now + 0.2);
+                    gain.gain.setValueAtTime(0.2, now);
+                    gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+                    osc.start(now);
+                    osc.stop(now + 0.2);
+                }
+            } catch (e) {}
+        }
+
+        // Resizing Canvas
+        function resizeCanvas() {
+            const container = document.querySelector('.canvas-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            webcamCanvas.width = width;
+            webcamCanvas.height = height;
+            gameCanvas.width = width;
+            gameCanvas.height = height;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- BUG CLASS ---
+        class Bug {
+            constructor(width, height) {
+                this.type = Math.random() < 0.5 ? 'fly' : 'cockroach';
+                this.radius = 26;
+                
+                const side = Math.floor(Math.random() * 4);
+                if (side === 0) { // Top
+                    this.x = Math.random() * width;
+                    this.y = -this.radius;
+                } else if (side === 1) { // Right
+                    this.x = width + this.radius;
+                    this.y = Math.random() * height;
+                } else if (side === 2) { // Bottom
+                    this.x = Math.random() * width;
+                    this.y = height + this.radius;
+                } else { // Left
+                    this.x = -this.radius;
+                    this.y = Math.random() * height;
+                }
+
+                this.targetX = width / 2;
+                this.targetY = height / 2;
+
+                const angle = Math.atan2(this.targetY - this.y, this.targetX - this.x);
+                this.speed = 1.0 + Math.random() * 0.7; // 조금 천천히 이동하도록 조정
+                this.vx = Math.cos(angle) * this.speed;
+                this.vy = Math.sin(angle) * this.speed;
+                this.angle = angle;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle + Math.PI / 2);
+
+                if (this.type === 'fly') {
+                    // 파리 그래픽
+                    const wingOffset = Math.sin(Date.now() * 0.04) * 8;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                    ctx.beginPath();
+                    ctx.ellipse(-12 - wingOffset/2, 0, 12, 18, Math.PI / 4, 0, Math.PI * 2);
+                    ctx.ellipse(12 + wingOffset/2, 0, 12, 18, -Math.PI / 4, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    ctx.fillStyle = '#0f172a';
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, 12, 18, 0, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    ctx.fillStyle = '#ef4444';
+                    ctx.beginPath();
+                    ctx.arc(-6, -12, 5, 0, Math.PI * 2);
+                    ctx.arc(6, -12, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    // 바퀴벌레 그래픽
+                    ctx.strokeStyle = '#b45309';
+                    ctx.lineWidth = 2.5;
+                    for(let i = -1; i <= 1; i++) {
+                        ctx.beginPath();
+                        ctx.moveTo(0, i * 8);
+                        ctx.lineTo(-20, i * 11 - 5);
+                        ctx.moveTo(0, i * 8);
+                        ctx.lineTo(20, i * 11 - 5);
+                        ctx.stroke();
+                    }
+                    ctx.beginPath();
+                    ctx.moveTo(-4, -14);
+                    ctx.quadraticCurveTo(-18, -28, -24, -34);
+                    ctx.moveTo(4, -14);
+                    ctx.quadraticCurveTo(18, -28, 24, -34);
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#78350f';
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, 13, 22, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            }
+
+            // 아주 넓어진 히트 영역 검사
+            isInTargetZone(width, height) {
+                const dx = this.x - (width / 2);
+                const dy = this.y - (height / 2);
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                return dist <= EASY_TARGET_RADIUS;
+            }
+
+            // 정중앙을 지나치고 한참 벗어났을 때 처리
+            isFarBeyond(width, height) {
+                const dx = this.x - (width / 2);
+                const dy = this.y - (height / 2);
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const dotProduct = (this.x - width/2) * this.vx + (this.y - height/2) * this.vy;
+                return dist > (EASY_TARGET_RADIUS + 40) && dotProduct > 0;
+            }
+        }
+
+        // --- POPUP HIT EFFECT ---
+        class HitEffect {
+            constructor(x, y, text, color) {
+                this.x = x;
+                this.y = y;
+                this.text = text;
+                this.color = color;
+                this.opacity = 1.0;
+                this.scale = 0.6;
+            }
+            update() {
+                this.y -= 1.2;
+                this.opacity -= 0.025;
+                if (this.scale < 1.3) this.scale += 0.06;
+            }
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, this.opacity);
+                ctx.font = 'black 32px Jua';
+                ctx.fillStyle = this.color;
+                ctx.textAlign = 'center';
+                ctx.translate(this.x, this.y);
+                ctx.scale(this.scale, this.scale);
+                ctx.shadowColor = 'black';
+                ctx.shadowBlur = 6;
+                ctx.fillText(this.text, 0, 0);
+                ctx.restore();
+            }
+        }
+
+        // --- FORGIVING POSE DETECTION LOGIC ---
+        async function initPoseModel() {
+            showToast("웹캠 및 쉬운 인식 포즈 모델을 연결하고 있습니다...");
+            try {
+                const size = 400;
+                webcam = new tmPose.Webcam(size, size, true);
+                await webcam.setup();
+                await webcam.play();
+
+                ctx = webcamCanvas.getContext('2d');
+                gameCtx = gameCanvas.getContext('2d');
+
+                window.requestAnimationFrame(loop);
+                showToast("준비 완료! 게임을 시작하세요.");
+            } catch (err) {
+                console.warn("웹캠 세팅 실패/권한 없음 (키보드 모드로 플레이 가능):", err);
+                showToast("웹캠 없이 키보드(A/S, 방향키)로도 플레이 가능합니다!");
+            }
+        }
+
+        async function loop() {
+            if (webcam && webcam.canvas) {
+                webcam.update();
+                if (ctx) {
+                    ctx.drawImage(webcam.canvas, 0, 0, webcamCanvas.width, webcamCanvas.height);
+                }
+                await predictPoseEasy();
+            }
+            updateGame();
+            window.requestAnimationFrame(loop);
+        }
+
+        // 포즈 감지 조건 (대폭 완화)
+        async function predictPoseEasy() {
+            try {
+                if (!window.posenetModel) {
+                    window.posenetModel = await posenet.load();
+                }
+                const pose = await window.posenetModel.estimateSinglePose(webcam.canvas, { flipHorizontal: true });
+                if (pose && pose.keypoints) {
+                    analyzeKeypointsEasy(pose.keypoints);
+                }
+            } catch (e) {
+                // Ignore fallback errors
+            }
+        }
+
+        function analyzeKeypointsEasy(keypoints) {
+            const leftWrist = keypoints.find(k => k.part === 'leftWrist');
+            const rightWrist = keypoints.find(k => k.part === 'rightWrist');
+            const leftElbow = keypoints.find(k => k.part === 'leftElbow');
+            const rightElbow = keypoints.find(k => k.part === 'rightElbow');
+            const nose = keypoints.find(k => k.part === 'nose');
+
+            let detected = "대기";
+
+            // 1. 박수 (Clap) 조건 대폭 완화: 손목 사이 거리 150px 이하 OR 두 손목이 얼굴 근처에 모임
+            if (leftWrist && rightWrist && leftWrist.score > 0.25 && rightWrist.score > 0.25) {
+                const wristDist = Math.hypot(leftWrist.position.x - rightWrist.position.x, leftWrist.position.y - rightWrist.position.y);
+                if (wristDist < 160) {
+                    detected = "박수";
+                }
+            }
+
+            // 2. 주먹 (Fist / Hand Raise) 조건 대폭 완화: 한 손이라도 코보다 높거나 팔꿈치가 높게 들림
+            if (detected === "대기") {
+                if (nose && ((leftWrist && leftWrist.score > 0.25 && leftWrist.position.y < nose.position.y + 40) || 
+                            (rightWrist && rightWrist.score > 0.25 && rightWrist.position.y < nose.position.y + 40))) {
+                    detected = "주먹";
+                } else if (leftElbow && rightElbow && (leftElbow.position.y < 180 || rightElbow.position.y < 180)) {
+                    detected = "주먹";
+                }
+            }
+
+            if (detected !== "대기") {
+                triggerAction(detected === "박수" ? "clap" : "fist", "동작 감지");
+            }
+        }
+
+        // --- ACTION TRIGGER & HIT REGISTRATION ---
+        function triggerAction(actionType, source = "") {
+            const now = Date.now();
+            // 연속 과도 입력 방지 쿨다운 (120ms)
+            if (now - lastActionTime < 120) return;
+            lastActionTime = now;
+
+            // 시각적 피드백 효과
+            showActionFeedback(actionType, source);
+
+            if (!isGameRunning) return;
+
+            const width = gameCanvas.width;
+            const height = gameCanvas.height;
+
+            let hitCount = 0;
+            const targetType = actionType === 'clap' ? 'fly' : 'cockroach';
+
+            // 타겟 존 내 매칭되는 모든 벌레 일괄 제거 (매우 쉬움!)
+            for (let i = bugs.length - 1; i >= 0; i--) {
+                const bug = bugs[i];
+                if (bug.isInTargetZone(width, height) && bug.type === targetType) {
+                    // 히트 성공
+                    bugs.splice(i, 1);
+                    hitCount++;
+                }
+            }
+
+            if (hitCount > 0) {
+                combo += hitCount;
+                if (combo > maxCombo) maxCombo = combo;
+                const addedScore = (100 * hitCount) + (combo * 10);
+                score += addedScore;
+
+                scoreDisplay.innerText = score;
+                comboDisplay.innerText = `${combo}🔥`;
+
+                playSound('hit');
+
+                hitEffects.push(new HitEffect(
+                    width / 2,
+                    height / 2 - 10,
+                    actionType === 'clap' ? `👏 파리 퇴치! (+${addedScore})` : `✊ 바퀴 퇴치! (+${addedScore})`,
+                    actionType === 'clap' ? '#facc15' : '#f87171'
+                ));
+            }
+        }
+
+        function triggerManualAction(actionType) {
+            triggerAction(actionType, "버튼/키보드");
+        }
+
+        // --- ACTION VISUAL FEEDBACK BANNER & FLASH ---
+        function showActionFeedback(actionType, source) {
+            if (actionType === 'clap') {
+                poseDisplay.innerHTML = `<span class="text-yellow-400">👏 박수!</span>`;
+                actionBanner.innerText = `👏 박수 (파리 잡기) ${source ? '['+source+']' : ''}`;
+                actionBanner.className = "absolute top-4 left-1/2 -translate-x-1/2 px-6 py-2 rounded-full font-black text-lg md:text-xl shadow-lg transition-all duration-150 transform translate-y-0 opacity-100 bg-yellow-400 text-slate-950 z-20";
+                
+                mainWrapper.classList.add('action-flash-clap');
+                targetZoneUI.style.borderColor = '#facc15';
+                setTimeout(() => {
+                    mainWrapper.classList.remove('action-flash-clap');
+                    targetZoneUI.style.borderColor = 'rgba(251, 191, 36, 0.8)';
+                }, 200);
+            } else {
+                poseDisplay.innerHTML = `<span class="text-rose-400">✊ 주먹!</span>`;
+                actionBanner.innerText = `✊ 주먹 (바퀴 잡기) ${source ? '['+source+']' : ''}`;
+                actionBanner.className = "absolute top-4 left-1/2 -translate-x-1/2 px-6 py-2 rounded-full font-black text-lg md:text-xl shadow-lg transition-all duration-150 transform translate-y-0 opacity-100 bg-rose-500 text-white z-20";
+
+                mainWrapper.classList.add('action-flash-fist');
+                targetZoneUI.style.borderColor = '#f87171';
+                setTimeout(() => {
+                    mainWrapper.classList.remove('action-flash-fist');
+                    targetZoneUI.style.borderColor = 'rgba(251, 191, 36, 0.8)';
+                }, 200);
+            }
+
+            // 배너 숨기기 타이머
+            clearTimeout(window.bannerTimer);
+            window.bannerTimer = setTimeout(() => {
+                actionBanner.classList.add('opacity-0', '-translate-y-2');
+            }, 600);
+        }
+
+        // --- KEYBOARD CONTROLS (FULL FORGIVING ASSIST) ---
+        window.addEventListener('keydown', (e) => {
+            if (e.repeat) return;
+            const key = e.key.toLowerCase();
+            
+            if (key === 'a' || key === '1' || key === 'arrowleft') {
+                triggerAction('clap', '키보드');
+            } else if (key === 's' || key === '2' || key === 'arrowright') {
+                triggerAction('fist', '키보드');
+            } else if (key === ' ' || key === 'spacebar') {
+                // 스페이스바: 현재 타겟존 벌레 자동 조준 폭파!
+                const targetBug = bugs.find(b => b.isInTargetZone(gameCanvas.width, gameCanvas.height));
+                if (targetBug) {
+                    triggerAction(targetBug.type === 'fly' ? 'clap' : 'fist', '스페이스');
+                } else {
+                    triggerAction('clap', '스페이스');
+                }
+            }
+        });
+
+        // --- GAME LOOP & UPDATES ---
+        function updateGame() {
+            const width = gameCanvas.width;
+            const height = gameCanvas.height;
+
+            gameCtx.clearRect(0, 0, width, height);
+
+            if (!isGameRunning) return;
+
+            // 벌레 업데이트 및 놓침 검사
+            for (let i = bugs.length - 1; i >= 0; i--) {
+                const bug = bugs[i];
+                bug.update();
+                bug.draw(gameCtx);
+
+                // 정중앙을 멀리 벗어난 경우만 놓침 처리
+                if (bug.isFarBeyond(width, height)) {
+                    combo = 0; // 콤보 초기화
+                    comboDisplay.innerText = `0🔥`;
+                    playSound('miss');
+                    hitEffects.push(new HitEffect(width / 2, height / 2 + 40, '놓침! 💨', '#94a3b8'));
+                    bugs.splice(i, 1);
+                }
+            }
+
+            // 히트 텍스트 렌더링
+            for (let i = hitEffects.length - 1; i >= 0; i--) {
+                const effect = hitEffects[i];
+                effect.update();
+                effect.draw(gameCtx);
+                if (effect.opacity <= 0) {
+                    hitEffects.splice(i, 1);
+                }
+            }
+        }
+
+        function spawnBug() {
+            if (!isGameRunning) return;
+            bugs.push(new Bug(gameCanvas.width, gameCanvas.height));
+        }
+
+        // --- GAME CONTROL ---
+        function startGame() {
+            score = 0;
+            combo = 0;
+            maxCombo = 0;
+            timeLeft = GAME_DURATION;
+            bugs = [];
+            hitEffects = [];
+            isGameRunning = true;
+
+            scoreDisplay.innerText = score;
+            comboDisplay.innerText = `0🔥`;
+            timerDisplay.innerText = `${timeLeft}s`;
+
+            modalOverlay.classList.add('hidden');
+
+            gameTimer = setInterval(() => {
+                timeLeft--;
+                timerDisplay.innerText = `${timeLeft}s`;
+                if (timeLeft <= 0) {
+                    endGame();
+                }
+            }, 1000);
+
+            spawnTimer = setInterval(spawnBug, BUG_SPAWN_INTERVAL);
+        }
+
+        function endGame() {
+            isGameRunning = false;
+            clearInterval(gameTimer);
+            clearInterval(spawnTimer);
+
+            finalScore.innerText = score;
+            finalCombo.innerText = `${maxCombo}🔥`;
+
+            modalStartContent.classList.add('hidden');
+            modalGameOverContent.classList.remove('hidden');
+            modalOverlay.classList.remove('hidden');
+        }
+
+        function resetGame() {
+            modalGameOverContent.classList.add('hidden');
+            modalStartContent.classList.remove('hidden');
+            startGame();
+        }
+
+        function showToast(msg, duration = 2500) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.remove('opacity-0', 'translate-y-4');
+            toast.classList.add('opacity-100', 'translate-y-0');
+
+            setTimeout(() => {
+                toast.classList.remove('opacity-100', 'translate-y-0');
+                toast.classList.add('opacity-0', 'translate-y-4');
+            }, duration);
+        }
+
+        window.onload = () => {
+            initPoseModel();
+        };
+    </script>
+</body>
+</html>
